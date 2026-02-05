@@ -1,0 +1,16 @@
+# Browser Automation Agent - Minimal Dependencies
+# Python 3.11+ required
+
+# Browser Control
+playwright==1.48.0
+
+# LLM Integration
+google-generativeai==0.8.3
+pillow==11.0.0
+
+# Utilities
+python-dotenv==1.0.1
+
+# Browser-Use (alternative approach with better element detection)
+browser-use>=0.11.0
+langchain-google-genai>=2.0.0
