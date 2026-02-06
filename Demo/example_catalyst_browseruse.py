@@ -194,7 +194,7 @@ GOAL: Find CRITICAL WIRELESS DEVICES (RED only) with IP, location, and root caus
 FOCUS: ONLY WIRELESS devices. ONLY CRITICAL (RED) status. IGNORE Fair, Good, or others.
 
 NAVIGATION:
-1. From LEFT MENU, click "Assurance" then "Dashboard" or "Health"
+1. From LEFT MENU, click "Assurance" then "Health"
 2. Look for "Wireless Controller" or "Access Point" widgets
 3. Find the RED BAR showing unhealthy status (e.g., "0/1" means 0 healthy out of 1)
 4. CLICK DIRECTLY on the RED BAR or the "0/1" text or "Wireless Controller" label
@@ -208,7 +208,7 @@ CRITICAL RULES:
 - ONLY WIRELESS devices (Wireless Controller, Access Point)
 - CLICK on RED BARS directly - they show unhealthy devices
 - DO NOT REFRESH if page is blank - just WAIT
-- After EVERY click, WAIT 30 seconds
+- After EVERY click, WAIT 10 seconds
 - SCROLL DOWN to find Event Viewer
 - NEVER navigate to same URL twice
 """

@@ -1,0 +1,6 @@
+langchain-google-genai
+langchain-core
+langgraph
+fastmcp
+python-dotenv
+playwright
