@@ -1,12 +1,16 @@
 """
 =============================================================================
-DEMO 03: Memory and Checkpointing
+DEMO 03: Memory & Checkpointing — Conversation History
 =============================================================================
 TECOPS-2622 | Cisco Live 2026 | Amsterdam
 Section: 03 - LangGraph Deep Dive
 
-Checkpointing gives your agent MEMORY across conversations.
-Each thread_id maintains its own conversation history.
+Checkpointing gives your graph MEMORY across invocations.
+Same thread_id = same conversation.  Different thread_id = fresh start.
+
+Example: two NOC operators (Alice & Bob) each have their own
+conversation history with a network assistant. The graph remembers
+who said what, and each operator's chat is independent.
 =============================================================================
 """
 
@@ -16,173 +20,125 @@ from langgraph.checkpoint.memory import MemorySaver
 import operator
 
 # =============================================================================
-# STEP 1: Define State with History
+# STEP 1: State — conversation history that grows over time
 # =============================================================================
 
 class State(TypedDict):
-    """State that tracks conversation history."""
-    # Messages will be APPENDED (not replaced) thanks to the reducer
+    # operator.add reducer → new messages are APPENDED, never replaced
     messages: Annotated[List[str], operator.add]
-    
-    # Current response (replaced each time)
+    user_name: str
+    user_input: str
     response: str
 
-print("=" * 60)
-print("DEMO: Memory and Checkpointing")
-print("=" * 60)
-
 # =============================================================================
-# STEP 2: Define a Simple Echo Node
+# STEP 2: Node — a simple network assistant that responds to queries
 # =============================================================================
 
-def echo_node(state: State) -> dict:
-    """
-    Echoes the last message and shows conversation history.
-    """
-    messages = state["messages"]
-    last_message = messages[-1] if messages else "No message"
-    
-    # Create response showing history
-    history_count = len(messages)
-    response = f"Echo: '{last_message}' (Message #{history_count} in this conversation)"
-    
-    return {"response": response}
+def assistant(state: State) -> dict:
+    """Respond to the user's message and update the conversation."""
+    name = state["user_name"]
+    query = state["user_input"]
+
+    # Simple rule-based responses (replace with LLM in production)
+    q = query.lower()
+    if "status" in q or "online" in q:
+        reply = "All core devices are online. No alerts at this time."
+    elif "cpu" in q:
+        reply = "R1-CORE CPU is at 42%, SW-DIST-02 is at 78% (elevated)."
+    elif "interface" in q or "errors" in q:
+        reply = "Gi0/1 on SW-DIST-02 shows 12 CRC errors in the last hour."
+    elif "ticket" in q or "incident" in q:
+        reply = "Incident INC-4021 is open for SW-DIST-02 high CPU. Assigned to NetOps."
+    else:
+        reply = f"I can help with device status, CPU, interface errors, and tickets."
+
+    return {
+        "messages": [f"{name}: {query}", f"Assistant: {reply}"],
+        "response": reply,
+    }
 
 # =============================================================================
 # STEP 3: Build the Graph
 # =============================================================================
 
 builder = StateGraph(State)
-builder.add_node("echo", echo_node)
-builder.add_edge(START, "echo")
-builder.add_edge("echo", END)
+builder.add_node("assistant", assistant)
+builder.add_edge(START, "assistant")
+builder.add_edge("assistant", END)
 
 # =============================================================================
-# STEP 4: Compile WITHOUT Memory (for comparison)
+# STEP 4: Compile — without and with memory
 # =============================================================================
 
-print("\n📋 Part 1: Without Memory")
-print("-" * 60)
+graph_no_memory = builder.compile()
 
-app_no_memory = builder.compile()
-
-# First call
-result1 = app_no_memory.invoke({
-    "messages": ["Hello!"],
-    "response": ""
-})
-print(f"Call 1: {result1['response']}")
-
-# Second call - no memory of first call!
-result2 = app_no_memory.invoke({
-    "messages": ["How are you?"],
-    "response": ""
-})
-print(f"Call 2: {result2['response']}")
-
-print("\n❌ Notice: Each call starts fresh. No memory!")
-
-# =============================================================================
-# STEP 5: Compile WITH Memory
-# =============================================================================
-
-print("\n" + "=" * 60)
-print("📋 Part 2: With Memory (Checkpointing)")
-print("-" * 60)
-
-# Create a memory checkpointer
 memory = MemorySaver()
+graph_with_memory = builder.compile(checkpointer=memory)
 
-# Compile with checkpointing enabled
-app_with_memory = builder.compile(checkpointer=memory)
-
-# Define a thread ID - this identifies the conversation
-config = {"configurable": {"thread_id": "user-alice-123"}}
-
-# First call
-result1 = app_with_memory.invoke(
-    {"messages": ["Hello!"], "response": ""},
-    config=config  # Pass the config!
-)
-print(f"Call 1: {result1['response']}")
-
-# Second call - SAME thread_id, so it remembers!
-result2 = app_with_memory.invoke(
-    {"messages": ["How are you?"], "response": ""},
-    config=config
-)
-print(f"Call 2: {result2['response']}")
-
-# Third call
-result3 = app_with_memory.invoke(
-    {"messages": ["What's the weather?"], "response": ""},
-    config=config
-)
-print(f"Call 3: {result3['response']}")
-
-print("\n✅ Notice: Message count increases! Memory works!")
+# Helper to invoke cleanly
+def ask(graph, name, message, config=None):
+    state = {"messages": [], "user_name": name, "user_input": message, "response": ""}
+    res = graph.invoke(state, config=config) if config else graph.invoke(state)
+    return res
 
 # =============================================================================
-# STEP 6: Different Thread = Different Memory
+# STEP 5: Run the Demo
 # =============================================================================
 
-print("\n" + "-" * 60)
-print("📋 Part 3: Different Users = Different Memory")
-print("-" * 60)
+if __name__ == "__main__":
+    print("=" * 55)
+    print("  LangGraph Demo — Memory & Checkpointing")
+    print("=" * 55)
 
-# New user with different thread_id
-config_bob = {"configurable": {"thread_id": "user-bob-456"}}
+    # --- Visualise the graph ---
+    print("\nGraph (Mermaid):\n")
+    print(graph_with_memory.get_graph().draw_mermaid())
 
-result_bob = app_with_memory.invoke(
-    {"messages": ["Hi, I'm Bob!"], "response": ""},
-    config=config_bob
-)
-print(f"Bob's Call 1: {result_bob['response']}")
+    # ---- Part A: Without memory -------------------------------------------
+    print("\n--- Part A: WITHOUT memory ---")
+    ask(graph_no_memory, "Alice", "What is the device status?")
+    res = ask(graph_no_memory, "Alice", "How about CPU?")
+    print(f"  Conversation length: {len(res['messages'])} messages")
+    print("  (Always 2 — no history carried over)\n")
 
-# Back to Alice - still has her history!
-result_alice = app_with_memory.invoke(
-    {"messages": ["Remember me?"], "response": ""},
-    config  # Alice's config
-)
-print(f"Alice's Call 4: {result_alice['response']}")
+    # ---- Part B: With memory (Alice) --------------------------------------
+    print("--- Part B: WITH memory (Alice's session) ---")
+    alice_cfg = {"configurable": {"thread_id": "alice-shift-001"}}
 
-# =============================================================================
-# STEP 7: Inspecting State
-# =============================================================================
+    conversations = [
+        "What is the device status?",
+        "How about CPU usage?",
+        "Any interface errors?",
+    ]
+    for msg in conversations:
+        res = ask(graph_with_memory, "Alice", msg, config=alice_cfg)
+        print(f"  Alice: {msg}")
+        print(f"    → {res['response']}")
+        print(f"    (history: {len(res['messages'])} messages)")
 
-print("\n" + "-" * 60)
-print("📋 Part 4: Inspecting Saved State")
-print("-" * 60)
+    # ---- Part C: Bob gets a fresh session ---------------------------------
+    print("\n--- Part C: Bob's session (separate history) ---")
+    bob_cfg = {"configurable": {"thread_id": "bob-shift-002"}}
 
-# Get current state for Alice
-alice_state = app_with_memory.get_state(config)
-print(f"Alice's full message history:")
-for i, msg in enumerate(alice_state.values["messages"], 1):
-    print(f"   {i}. {msg}")
+    res = ask(graph_with_memory, "Bob", "Any open tickets?", config=bob_cfg)
+    print(f"  Bob: Any open tickets?")
+    print(f"    → {res['response']}")
+    print(f"    (history: {len(res['messages'])} messages — fresh start)")
 
-# =============================================================================
-# Summary
-# =============================================================================
+    # ---- Part D: Inspect full conversation histories ----------------------
+    print("\n--- Part D: Full conversation histories ---")
 
-print("\n" + "=" * 60)
-print("💡 Key Takeaways:")
-print("=" * 60)
-print("""
-1. MemorySaver stores state after each step
-2. thread_id identifies unique conversations
-3. Same thread_id = same conversation history
-4. Different thread_id = fresh start
+    print("\n  Alice's session:")
+    alice_state = graph_with_memory.get_state(alice_cfg)
+    for i, msg in enumerate(alice_state.values["messages"], 1):
+        print(f"    {i}. {msg}")
 
-Usage Pattern:
+    print(f"\n  Bob's session:")
+    bob_state = graph_with_memory.get_state(bob_cfg)
+    for i, msg in enumerate(bob_state.values["messages"], 1):
+        print(f"    {i}. {msg}")
 
-   memory = MemorySaver()
-   app = workflow.compile(checkpointer=memory)
-   
-   config = {"configurable": {"thread_id": "unique-id"}}
-   app.invoke(input, config=config)
-
-For Production:
-   Use SqliteSaver or PostgresSaver for persistence!
-""")
-
-print("✅ Demo complete!")
+    print(f"\n  Alice has {len(alice_state.values['messages'])} messages.")
+    print(f"  Bob has {len(bob_state.values['messages'])} messages.")
+    print("  Each thread_id keeps its own conversation.\n")
+    print("=" * 55)

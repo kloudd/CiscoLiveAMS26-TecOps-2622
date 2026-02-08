@@ -1,12 +1,12 @@
 """
 =============================================================================
-DEMO 01: Hello World Graph
+DEMO 01: Hello World Graph — Device Ping Check
 =============================================================================
 TECOPS-2622 | Cisco Live 2026 | Amsterdam
 Section: 03 - LangGraph Deep Dive
 
-Your first LangGraph! A simple graph that says "Hello World".
-This demonstrates State, Nodes, and Edges.
+Your first LangGraph! A two-node graph that pings a network device
+and reports the result. Demonstrates State, Nodes, and Edges.
 =============================================================================
 """
 
@@ -16,131 +16,80 @@ from langgraph.graph import StateGraph, START, END
 # =============================================================================
 # STEP 1: Define the State
 # =============================================================================
-# State is the shared memory that flows through all nodes
+# State = the shared data that flows through every node in the graph.
 
 class State(TypedDict):
-    """Simple state with just a text field."""
-    text: str
-
-print("=" * 60)
-print("DEMO: Hello World Graph")
-print("=" * 60)
-
-print("\n📋 Step 1: Define State")
-print("   class State(TypedDict):")
-print("       text: str")
+    device: str
+    ip: str
+    reachable: bool
+    message: str
 
 # =============================================================================
-# STEP 2: Define Nodes
+# STEP 2: Define the Nodes
 # =============================================================================
-# Nodes are functions that:
-#   - Receive the current State
-#   - Return a partial State update
+# Each node is a plain function:  receives State → returns partial update.
 
-def node_hello(state: State) -> dict:
-    """First node: Sets text to 'Hello'"""
-    print("   🔄 node_hello executing...")
-    return {"text": "Hello"}
+def ping_device(state: State) -> dict:
+    """Simulate pinging the device."""
+    ip = state["ip"]
+    print(f"  Pinging {state['device']} ({ip}) ...")
+    # Simulated result (in real life: subprocess ping / netmiko / pyATS)
+    reachable = not ip.startswith("10.0.99")   # .99 subnet = unreachable for demo
+    return {"reachable": reachable}
 
-def node_world(state: State) -> dict:
-    """Second node: Appends ' World' to text"""
-    print("   🔄 node_world executing...")
-    current_text = state["text"]
-    return {"text": current_text + " World"}
-
-print("\n📋 Step 2: Define Nodes")
-print("   node_hello: returns {'text': 'Hello'}")
-print("   node_world: appends ' World' to text")
+def report_status(state: State) -> dict:
+    """Build a human-readable status message."""
+    if state["reachable"]:
+        msg = f"{state['device']} ({state['ip']}) is UP and reachable."
+    else:
+        msg = f"{state['device']} ({state['ip']}) is DOWN — no response."
+    print(f"  Result: {msg}")
+    return {"message": msg}
 
 # =============================================================================
-# STEP 3: Build the Graph
+# STEP 3: Build & Compile the Graph
 # =============================================================================
+#   START  →  ping_device  →  report_status  →  END
 
-print("\n📋 Step 3: Build Graph")
-
-# Create a StateGraph with our State type
 builder = StateGraph(State)
+builder.add_node("ping_device", ping_device)
+builder.add_node("report_status", report_status)
 
-# Add nodes to the graph
-builder.add_node("hello", node_hello)
-builder.add_node("world", node_world)
-print("   ✓ Added nodes: hello, world")
+builder.add_edge(START, "ping_device")
+builder.add_edge("ping_device", "report_status")
+builder.add_edge("report_status", END)
 
-# Add edges (the flow)
-builder.add_edge(START, "hello")    # START → hello
-builder.add_edge("hello", "world")  # hello → world
-builder.add_edge("world", END)      # world → END
-print("   ✓ Added edges: START → hello → world → END")
+graph = builder.compile()
 
 # =============================================================================
-# STEP 4: Compile the Graph
+# STEP 4: Run the Graph
 # =============================================================================
 
-print("\n📋 Step 4: Compile")
+if __name__ == "__main__":
+    print("=" * 55)
+    print("  LangGraph Demo — Device Ping Check")
+    print("=" * 55)
 
-app = builder.compile()
-print("   ✓ Graph compiled successfully!")
+    # --- Visualise the graph ---
+    print("\nGraph (Mermaid):\n")
+    print(graph.get_graph().draw_mermaid())
 
-# =============================================================================
-# STEP 5: Visualize the Graph (text representation)
-# =============================================================================
+    # --- Test 1: reachable device ---
+    print("\n--- Test 1: Core Router ---")
+    result = graph.invoke({
+        "device": "R1-CORE",
+        "ip": "10.0.1.1",
+        "reachable": False,
+        "message": "",
+    })
+    print(f"  Final state → {result['message']}\n")
 
-print("\n📊 Graph Structure:")
-print("""
-    ┌─────────┐
-    │  START  │
-    └────┬────┘
-         │
-    ┌────▼────┐
-    │  hello  │  → Sets text = "Hello"
-    └────┬────┘
-         │
-    ┌────▼────┐
-    │  world  │  → Appends " World"
-    └────┬────┘
-         │
-    ┌────▼────┐
-    │   END   │
-    └─────────┘
-""")
-
-# =============================================================================
-# STEP 6: Run the Graph
-# =============================================================================
-
-print("-" * 60)
-print("🚀 Running the Graph...")
-print("-" * 60)
-
-# Invoke with initial state
-initial_state = {"text": ""}
-print(f"\n   Input: {initial_state}")
-
-result = app.invoke(initial_state)
-
-print(f"\n   Output: {result}")
-
-# =============================================================================
-# STEP 7: Understanding the Flow
-# =============================================================================
-
-print("\n" + "=" * 60)
-print("💡 What Happened:")
-print("=" * 60)
-print("""
-1. We started with: {"text": ""}
-
-2. node_hello ran:
-   - Received: {"text": ""}
-   - Returned: {"text": "Hello"}
-   - State became: {"text": "Hello"}
-
-3. node_world ran:
-   - Received: {"text": "Hello"}
-   - Returned: {"text": "Hello World"}
-   - State became: {"text": "Hello World"}
-
-4. Reached END with final state!
-""")
-
-print("✅ Demo complete!")
+    # --- Test 2: unreachable device ---
+    print("--- Test 2: Unreachable Switch ---")
+    result = graph.invoke({
+        "device": "SW-BRANCH-07",
+        "ip": "10.0.99.7",
+        "reachable": False,
+        "message": "",
+    })
+    print(f"  Final state → {result['message']}")

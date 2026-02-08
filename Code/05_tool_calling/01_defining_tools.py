@@ -11,156 +11,86 @@ Good tool definitions = smart tool selection by the LLM!
 """
 
 from langchain_core.tools import tool
-from typing import List
 
 # =============================================================================
-# STEP 1: Simple Tool Definition
+# STEP 1: A Simple Tool
 # =============================================================================
-
-print("=" * 60)
-print("DEMO: Defining Tools")
-print("=" * 60)
 
 @tool
-def multiply(a: int, b: int) -> int:
+def ping_device(hostname: str) -> str:
     """
-    Multiply two numbers together.
-    
-    Args:
-        a: First number
-        b: Second number
-    
-    Returns:
-        The product of a and b
-    """
-    return a * b
+    Ping a network device to check reachability.
 
-print("\n📋 Tool 1: multiply")
-print(f"   Name: {multiply.name}")
-print(f"   Description: {multiply.description}")
+    Args:
+        hostname: The device hostname (e.g., "R1-CORE", "SW-DIST-02")
+
+    Returns:
+        A message indicating whether the device responded.
+    """
+    # Simulated (in production: subprocess or pyATS)
+    reachable = hostname.upper() != "FW-EDGE-01"
+    if reachable:
+        return f"{hostname} is reachable (response time: 4ms)"
+    return f"{hostname} is unreachable — request timed out"
 
 # =============================================================================
-# STEP 2: Tool with Complex Types
+# STEP 2: A Tool with Optional Parameters
 # =============================================================================
 
 @tool
 def get_device_status(hostname: str, include_interfaces: bool = False) -> dict:
     """
     Check the operational status of a network device.
-    
+
     Use this tool when you need to know:
     - If a device is online or offline
     - The device's current health metrics
     - Interface status (if include_interfaces is True)
-    
+
     Args:
         hostname: The device hostname (e.g., "SW-CORE-01", "R1")
         include_interfaces: Whether to include interface details
-    
+
     Returns:
         Dictionary with device status information
     """
-    # Simulated response (in real code, this would call an API)
     result = {
         "hostname": hostname,
         "status": "online",
         "uptime_hours": 720,
-        "health_score": 95
+        "health_score": 95,
     }
-    
     if include_interfaces:
         result["interfaces"] = [
-            {"name": "Gi0/1", "status": "up"},
-            {"name": "Gi0/2", "status": "down"}
+            {"name": "Gi0/1", "status": "up", "speed": "1Gbps"},
+            {"name": "Gi0/2", "status": "down", "speed": "—"},
         ]
-    
     return result
 
-print("\n📋 Tool 2: get_device_status")
-print(f"   Name: {get_device_status.name}")
-print(f"   Description: {get_device_status.description[:50]}...")
-
 # =============================================================================
-# STEP 3: View Tool Schema (What LLM Sees)
+# STEP 3: Inspect What the LLM Sees
 # =============================================================================
 
-print("\n" + "-" * 60)
-print("🔍 Tool Schema (What the LLM Receives):")
-print("-" * 60)
+if __name__ == "__main__":
+    print("=" * 55)
+    print("  Tool Calling Demo — Defining Tools")
+    print("=" * 55)
 
-# The LLM sees this JSON schema to understand how to call the tool
-schema = get_device_status.args_schema.schema()
-print(f"""
-{{
-  "name": "{get_device_status.name}",
-  "description": "{get_device_status.description[:60]}...",
-  "parameters": {{
-    "type": "object",
-    "properties": {{
-      "hostname": {{"type": "string", "description": "The device hostname..."}},
-      "include_interfaces": {{"type": "boolean", "default": false}}
-    }},
-    "required": ["hostname"]
-  }}
-}}
-""")
+    # -- Show tool metadata (this is what the LLM receives) --
+    for t in [ping_device, get_device_status]:
+        print(f"\nTool: {t.name}")
+        print(f"  Description: {t.description[:80]}...")
+        print(f"  Schema: {t.args_schema.schema()}")
 
-# =============================================================================
-# STEP 4: Calling Tools Directly
-# =============================================================================
+    # -- Call the tools directly --
+    print("\n" + "-" * 55)
+    print("Calling tools directly:\n")
 
-print("-" * 60)
-print("🔧 Calling Tools Directly:")
-print("-" * 60)
+    print(f"  ping_device('R1-CORE')      → {ping_device.invoke({'hostname': 'R1-CORE'})}")
+    print(f"  ping_device('FW-EDGE-01')   → {ping_device.invoke({'hostname': 'FW-EDGE-01'})}")
 
-# You can call tools like normal functions
-result1 = multiply.invoke({"a": 5, "b": 6})
-print(f"\n   multiply(5, 6) = {result1}")
-
-result2 = get_device_status.invoke({
-    "hostname": "SW-CORE-01",
-    "include_interfaces": True
-})
-print(f"\n   get_device_status('SW-CORE-01'):")
-print(f"      Status: {result2['status']}")
-print(f"      Health: {result2['health_score']}%")
-print(f"      Interfaces: {len(result2['interfaces'])} found")
-
-# =============================================================================
-# STEP 5: Why Good Docstrings Matter
-# =============================================================================
-
-print("\n" + "=" * 60)
-print("💡 Why Docstrings Matter:")
-print("=" * 60)
-
-print("""
-The LLM READS your docstring to decide WHEN to use a tool!
-
-❌ Bad:
-   @tool
-   def check(x):
-       \"\"\"Check something.\"\"\"
-   
-   → LLM doesn't know when to use this!
-
-✅ Good:
-   @tool
-   def get_device_status(hostname: str):
-       \"\"\"
-       Check if a network device is online.
-       
-       Use when the user asks about:
-       - Device health or status
-       - Whether something is reachable
-       - Uptime information
-       
-       Do NOT use for:
-       - Configuration changes
-       - Historical data
-       \"\"\"
-   
-   → LLM knows exactly when to use this!
-""")
-
-print("✅ Demo complete!")
+    status = get_device_status.invoke({"hostname": "SW-CORE-01", "include_interfaces": True})
+    print(f"\n  get_device_status('SW-CORE-01', include_interfaces=True):")
+    print(f"    status: {status['status']}, health: {status['health_score']}%")
+    for iface in status["interfaces"]:
+        print(f"    {iface['name']}: {iface['status']} ({iface['speed']})")
