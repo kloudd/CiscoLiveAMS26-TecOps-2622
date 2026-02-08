@@ -6,329 +6,203 @@ TECOPS-2622 | Cisco Live 2026 | Amsterdam
 Section: 08 - RAG & Production Patterns
 
 Essential patterns for running agents in production:
-- Error handling with retries
-- Cost tracking
-- Sandboxing/permissions
-- Logging
+  1. Cost tracking          — stay on budget
+  2. Retry with backoff     — handle transient failures
+  3. Tool sandboxing        — enforce permissions
+  4. Structured logging     — observability
 =============================================================================
 """
 
 import os
-import time
-from functools import wraps
-from typing import TypedDict, Annotated, List
+import json
+import logging
+from datetime import datetime
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.tools import tool
-from langgraph.graph import StateGraph, START, END
-from langgraph.graph.message import add_messages
-from langgraph.prebuilt import ToolNode
+from langgraph.prebuilt import create_react_agent
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 # =============================================================================
 # PATTERN 1: Cost Tracking
 # =============================================================================
 
-print("=" * 60)
-print("DEMO: Production Patterns")
-print("=" * 60)
+class CostLimitExceeded(Exception):
+    pass
 
-print("\n" + "-" * 60)
-print("📊 PATTERN 1: Cost Tracking")
-print("-" * 60)
 
 class CostTracker:
-    """Track API costs across multiple calls."""
-    
+    """Track API token usage and enforce a spending cap."""
+
     def __init__(self, max_cost: float = 1.0):
         self.max_cost = max_cost
         self.total_tokens = 0
         self.total_cost = 0.0
         self.calls = 0
-    
+
     def add_usage(self, prompt_tokens: int, completion_tokens: int):
-        """Add usage from an API call."""
         self.calls += 1
         self.total_tokens += prompt_tokens + completion_tokens
-        
-        # Approximate cost (GPT-4 pricing)
-        input_cost = prompt_tokens * 0.00001  # $0.01 per 1K
-        output_cost = completion_tokens * 0.00003  # $0.03 per 1K
-        self.total_cost += input_cost + output_cost
-        
+        self.total_cost += prompt_tokens * 0.00001 + completion_tokens * 0.00003
         if self.total_cost > self.max_cost:
             raise CostLimitExceeded(
                 f"Cost ${self.total_cost:.4f} exceeds limit ${self.max_cost}"
             )
-    
-    def report(self):
-        """Print usage report."""
-        print(f"\n📊 Cost Report:")
-        print(f"   API Calls: {self.calls}")
-        print(f"   Total Tokens: {self.total_tokens:,}")
-        print(f"   Estimated Cost: ${self.total_cost:.4f}")
 
-class CostLimitExceeded(Exception):
-    pass
-
-# Example usage
-tracker = CostTracker(max_cost=0.50)  # $0.50 limit
-
-print("""
-class CostTracker:
-    def __init__(self, max_cost=1.0):
-        self.max_cost = max_cost
-        self.total_cost = 0.0
-    
-    def add_usage(self, prompt_tokens, completion_tokens):
-        # Calculate cost
-        # Raise CostLimitExceeded if over budget
-        pass
-""")
+    def report(self) -> str:
+        return (f"Calls: {self.calls} | "
+                f"Tokens: {self.total_tokens:,} | "
+                f"Cost: ${self.total_cost:.4f}")
 
 # =============================================================================
-# PATTERN 2: Retry with Backoff
+# PATTERN 2: Retry with Exponential Backoff
 # =============================================================================
-
-print("\n" + "-" * 60)
-print("🔄 PATTERN 2: Retry with Exponential Backoff")
-print("-" * 60)
 
 @retry(
     stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=2, max=10)
+    wait=wait_exponential(multiplier=1, min=2, max=10),
 )
 def call_with_retry(func, *args, **kwargs):
-    """
-    Call a function with automatic retry on failure.
-    
-    Uses exponential backoff:
-    - Attempt 1: immediate
-    - Attempt 2: wait 2 seconds
-    - Attempt 3: wait 4 seconds
-    - Give up after 3 attempts
-    """
+    """Call any function with automatic retry (3 attempts, exponential backoff)."""
     return func(*args, **kwargs)
 
-print("""
-from tenacity import retry, stop_after_attempt, wait_exponential
-
-@retry(
-    stop=stop_after_attempt(3),           # Max 3 attempts
-    wait=wait_exponential(min=2, max=10)  # Exponential backoff
-)
-def call_with_retry(func, *args, **kwargs):
-    return func(*args, **kwargs)
-    
-# Automatically retries on:
-# - API rate limits
-# - Temporary network issues
-# - Server errors (500s)
-""")
-
 # =============================================================================
-# PATTERN 3: Tool Sandboxing
+# PATTERN 3: Tool Sandboxing / Permission Levels
 # =============================================================================
-
-print("\n" + "-" * 60)
-print("🔒 PATTERN 3: Tool Sandboxing")
-print("-" * 60)
 
 class SandboxedToolExecutor:
-    """Execute tools with permission checks."""
-    
-    # Define permission levels
-    ALLOWED_TOOLS = {
-        "read": ["get_device_status", "get_cpu_utilization", "list_devices"],
+    """Enforce permission-based access control on tools."""
+
+    PERMISSIONS = {
+        "read":  ["get_device_status", "get_cpu_utilization", "list_devices"],
         "write": ["configure_vlan", "backup_config"],
-        "admin": ["reboot_device", "restore_config"]
+        "admin": ["reboot_device", "restore_config"],
     }
-    
+
     DANGEROUS_PATTERNS = ["DELETE", "DROP", "shutdown", "reload", "format"]
-    
-    def __init__(self, permission_level: str = "read"):
-        self.permission_level = permission_level
-    
+
+    def __init__(self, level: str = "read"):
+        self.level = level
+        # Build allowed set: read ⊂ write ⊂ admin
+        self.allowed = set()
+        for lvl in ("read", "write", "admin"):
+            self.allowed.update(self.PERMISSIONS[lvl])
+            if lvl == self.level:
+                break
+
     def can_execute(self, tool_name: str, args: dict) -> tuple[bool, str]:
-        """Check if tool execution is allowed."""
-        
-        # Check tool allowlist based on permission level
-        allowed = set()
-        if self.permission_level in ["read", "write", "admin"]:
-            allowed.update(self.ALLOWED_TOOLS["read"])
-        if self.permission_level in ["write", "admin"]:
-            allowed.update(self.ALLOWED_TOOLS["write"])
-        if self.permission_level == "admin":
-            allowed.update(self.ALLOWED_TOOLS["admin"])
-        
-        if tool_name not in allowed:
-            return False, f"Tool '{tool_name}' not allowed for permission level '{self.permission_level}'"
-        
-        # Check for dangerous patterns in arguments
-        args_str = str(args).upper()
-        for pattern in self.DANGEROUS_PATTERNS:
-            if pattern in args_str:
-                return False, f"Dangerous pattern '{pattern}' detected in arguments"
-        
+        if tool_name not in self.allowed:
+            return False, f"'{tool_name}' not allowed at level '{self.level}'"
+        args_upper = str(args).upper()
+        for pat in self.DANGEROUS_PATTERNS:
+            if pat in args_upper:
+                return False, f"Dangerous pattern '{pat}' in arguments"
         return True, "OK"
-
-sandbox = SandboxedToolExecutor(permission_level="read")
-
-# Test permissions
-tests = [
-    ("get_device_status", {"hostname": "R1"}),
-    ("reboot_device", {"hostname": "R1"}),
-    ("configure_vlan", {"vlan_id": 100}),
-]
-
-print("\n   Permission Level: 'read'")
-print("\n   Testing tool permissions:")
-for tool_name, args in tests:
-    allowed, reason = sandbox.can_execute(tool_name, args)
-    status = "✅" if allowed else "❌"
-    print(f"      {status} {tool_name}: {reason}")
 
 # =============================================================================
 # PATTERN 4: Structured Logging
 # =============================================================================
 
-print("\n" + "-" * 60)
-print("📝 PATTERN 4: Structured Logging")
-print("-" * 60)
-
-import logging
-import json
-from datetime import datetime
-
-# Configure structured logging
 class StructuredFormatter(logging.Formatter):
     def format(self, record):
-        log_data = {
-            "timestamp": datetime.utcnow().isoformat(),
+        entry = {
+            "ts": datetime.utcnow().isoformat(),
             "level": record.levelname,
-            "message": record.getMessage(),
-            "module": record.module
+            "msg": record.getMessage(),
         }
-        # Add extra fields if present
-        if hasattr(record, 'extra'):
-            log_data.update(record.extra)
-        return json.dumps(log_data)
+        if hasattr(record, "extra"):
+            entry.update(record.extra)
+        return json.dumps(entry)
 
-# Setup logger
-logger = logging.getLogger("agent")
-logger.setLevel(logging.INFO)
-handler = logging.StreamHandler()
-handler.setFormatter(StructuredFormatter())
-# Uncomment to enable: logger.addHandler(handler)
 
-print("""
-import logging
-import json
-
-class StructuredFormatter(logging.Formatter):
-    def format(self, record):
-        return json.dumps({
-            "timestamp": datetime.utcnow().isoformat(),
-            "level": record.levelname,
-            "message": record.getMessage(),
-            "tool": getattr(record, 'tool', None),
-            "duration_ms": getattr(record, 'duration_ms', None)
-        })
-
-# Usage in agent:
-logger.info("Tool executed", extra={
-    "tool": "get_device_status",
-    "duration_ms": 245,
-    "success": True
-})
-""")
+def get_logger(name: str = "agent") -> logging.Logger:
+    lgr = logging.getLogger(name)
+    lgr.setLevel(logging.INFO)
+    if not lgr.handlers:
+        h = logging.StreamHandler()
+        h.setFormatter(StructuredFormatter())
+        lgr.addHandler(h)
+    return lgr
 
 # =============================================================================
-# PATTERN 5: Complete Production Agent
+# STEP 5: Demo — putting it all together
 # =============================================================================
 
-print("\n" + "-" * 60)
-print("🏭 PATTERN 5: Production-Ready Agent")
-print("-" * 60)
+# Simple tools for the demo
+@tool
+def get_device_status(hostname: str) -> dict:
+    """Check if a device is online and get its health status."""
+    return {"hostname": hostname, "status": "online", "health": 95}
 
-print("""
-Combining all patterns:
+@tool
+def get_cpu_utilization(hostname: str) -> dict:
+    """Get current CPU usage percentage for a device."""
+    return {"hostname": hostname, "cpu_percent": 45}
 
-class ProductionAgent:
-    def __init__(self, 
-                 model: str = "gpt-5.2",
-                 max_cost: float = 1.0,
-                 permission_level: str = "read",
-                 max_retries: int = 3):
-        
-        self.llm = ChatOpenAI(model=model)
-        self.cost_tracker = CostTracker(max_cost)
-        self.sandbox = SandboxedToolExecutor(permission_level)
-        self.max_retries = max_retries
-        self.logger = setup_logger()
-    
-    def invoke(self, query: str):
-        try:
-            # 1. Log the query
-            self.logger.info(f"Query received: {query}")
-            
-            # 2. Run with retry
-            result = self._invoke_with_retry(query)
-            
-            # 3. Track cost
-            self.cost_tracker.add_usage(...)
-            
-            # 4. Log success
-            self.logger.info("Query completed", extra={
-                "tokens": self.cost_tracker.total_tokens,
-                "cost": self.cost_tracker.total_cost
-            })
-            
-            return result
-            
-        except CostLimitExceeded as e:
-            self.logger.error(f"Cost limit exceeded: {e}")
-            raise
-        except Exception as e:
-            self.logger.error(f"Agent error: {e}")
-            raise
-""")
+@tool
+def reboot_device(hostname: str) -> str:
+    """Reboot a network device. Use with caution!"""
+    return f"Rebooting {hostname}..."
 
-# =============================================================================
-# Summary
-# =============================================================================
+tools = [get_device_status, get_cpu_utilization, reboot_device]
 
-print("\n" + "=" * 60)
-print("💡 Production Checklist")
-print("=" * 60)
 
-print("""
-Before deploying your agent:
+if __name__ == "__main__":
+    print("=" * 55)
+    print("  Production Patterns Demo")
+    print("=" * 55)
 
-☐ Cost Tracking
-  - Set budget limits
-  - Track token usage
-  - Alert on overspend
+    # --- Pattern 1: Cost Tracking ---
+    print("\n--- Pattern 1: Cost Tracking ---")
+    tracker = CostTracker(max_cost=0.50)
+    tracker.add_usage(prompt_tokens=800, completion_tokens=120)
+    tracker.add_usage(prompt_tokens=650, completion_tokens=90)
+    print(f"  {tracker.report()}")
 
-☐ Error Handling
-  - Retry with backoff
-  - Graceful degradation
-  - Human escalation
+    # --- Pattern 2: Retry ---
+    print("\n--- Pattern 2: Retry with Backoff ---")
+    result = call_with_retry(get_device_status.invoke, {"hostname": "R1-CORE"})
+    print(f"  call_with_retry(get_device_status, 'R1-CORE') → {result}")
 
-☐ Security
-  - Tool allowlists
-  - Input validation
-  - Dangerous pattern detection
+    # --- Pattern 3: Sandboxing ---
+    print("\n--- Pattern 3: Tool Sandboxing ---")
+    for level in ("read", "write", "admin"):
+        sandbox = SandboxedToolExecutor(level=level)
+        checks = [
+            ("get_device_status", {"hostname": "R1"}),
+            ("configure_vlan",    {"vlan_id": 100}),
+            ("reboot_device",     {"hostname": "R1"}),
+        ]
+        results = []
+        for name, args in checks:
+            ok, _ = sandbox.can_execute(name, args)
+            results.append(f"{'Y' if ok else 'N'}")
+        print(f"  level={level:5s} → status={results[0]}  vlan={results[1]}  reboot={results[2]}")
 
-☐ Observability
-  - Structured logging
-  - LangSmith tracing
-  - Metrics collection
+    # --- Pattern 4: Structured Logging ---
+    print("\n--- Pattern 4: Structured Logging ---")
+    logger = get_logger("demo")
+    logger.info("Device checked", extra={"extra": {"tool": "get_device_status", "device": "R1-CORE"}})
 
-☐ Testing
-  - Unit tests for tools
-  - Integration tests
-  - Regression testing
-""")
+    # --- Full agent run with cost tracking ---
+    print("\n--- Putting it together: Agent + Cost Tracking ---")
+    llm = ChatOpenAI(
+        model="gpt-5.2",
+        temperature=0,
+        api_key=os.getenv("OPENAI_API_KEY"),
+    )
+    agent = create_react_agent(llm, tools)
 
-print("✅ Demo complete!")
+    query = "Is R1-CORE online?"
+    print(f"  Query: \"{query}\"")
+    result = agent.invoke({"messages": [("user", query)]})
+
+    final = result["messages"][-1]
+    print(f"  Agent: {final.content}")
+
+    # Track usage from response metadata if available
+    if hasattr(final, "usage_metadata") and final.usage_metadata:
+        meta = final.usage_metadata
+        tracker.add_usage(meta.get("input_tokens", 0), meta.get("output_tokens", 0))
+    print(f"  {tracker.report()}")
+
+    print(f"\n{'─' * 55}")

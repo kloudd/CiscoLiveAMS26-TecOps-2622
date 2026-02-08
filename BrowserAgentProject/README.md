@@ -23,7 +23,7 @@ This project uses LangGraph and FastMCP to control a browser for automation task
 Run the agent as a module from the root of the workspace:
 
 ```bash
-python -m BrowserAgentProject.main --task "Go to google.com and search for 'LangGraph'"
+python3.12 -m BrowserAgentProject.main --prompt catalyst
 ```
 
 ## Structure
